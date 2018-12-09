@@ -8,13 +8,16 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <stdlib.h>
-#include <memory.h>
+#include <stdbool.h>
 
 struct station {
-    pthread_mutex_t stationEntry;
+    pthread_mutex_t mutex;
 
-    pthread_cond_t trainFull;
-    pthread_cond_t trainArrival;
+    pthread_cond_t trainFull; //trains wait for this condition while passengers are boarding
+    pthread_cond_t trainArrival; //passengers wait for this condition until a train arrives
+    pthread_cond_t stationAvailable; //trains wait for other trains until they leave
+
+    bool stationAvailableForTrainEntry;
 
     int numWaitingPassengers;
     int numBoardedPassengers;
@@ -44,7 +47,10 @@ int main() {
 
 //    (rand() % 5)+1;
 
+    printf("dfdfd");
+
     int i;
+
     pthread_t trainIds[3];
     pthread_t passengerIds[70];
 
@@ -56,6 +62,8 @@ int main() {
 
     station_init(kingsCrossStation);
 
+
+    //generate scenario 10 passengers then 1 train 30 seats then 60 passengers then 2 trains each 30 seats
     for (i = 0; i < 10; i++) {
         pthread_create(&passengerIds[i], &attr, passengerSubRoutine, (void *) kingsCrossStation);
 
@@ -64,7 +72,6 @@ int main() {
         sprintf(passengerName, "passenger-%d", (i + 1));
 
         pthread_setname_np(passengerIds[i], passengerName);
-
     }
 
     struct trainData *trainData1 = (struct trainData *) malloc(sizeof(struct trainData));
@@ -112,39 +119,55 @@ int main() {
     pthread_join(trainIds[2], NULL);
 
 
-    pthread_mutex_destroy(&kingsCrossStation->stationEntry);
+    pthread_mutex_destroy(&kingsCrossStation->mutex);
     pthread_cond_destroy(&kingsCrossStation->trainFull);
     pthread_cond_destroy(&kingsCrossStation->trainArrival);
+    pthread_cond_destroy(&kingsCrossStation->stationAvailable);
 
     pthread_exit(NULL);
 
 }
 
 void station_init(struct station *station) {
-    pthread_mutex_init(&station->stationEntry, NULL);
+    pthread_mutex_init(&station->mutex, NULL);
 
     pthread_cond_init(&station->trainFull, NULL);
     pthread_cond_init(&station->trainArrival, NULL);
+    pthread_cond_init(&station->stationAvailable, NULL);
 
     station->numWaitingPassengers = 0;
     station->numBoardedPassengers = 0;
     station->currentTrainSeatCount = 0;
+    station->stationAvailableForTrainEntry = true;
 }
 
 void station_load_train(struct station *station, int seatCount) {
-    pthread_mutex_lock(&station->stationEntry);
 
+    pthread_mutex_lock(&station->mutex);
+
+//    //check if there is no train currently loading in the station
+//    while (station->stationAvailableForTrainEntry == false) {
+//        //if station is occupied then wait until it is empty
+//        pthread_cond_wait(&station->stationAvailable, &station->mutex);
+//    }
+
+
+    //if it is available then start loading passengers
     char trainName[THREAD_NAME_LENGTH];
     pthread_getname_np(pthread_self(), trainName, THREAD_NAME_LENGTH);
 
     printf("\n%s is loading", trainName);
 
+    //update available free seats
     station->currentTrainSeatCount = seatCount;
+
+    //signal to passengers that a train has come
     pthread_cond_broadcast(&station->trainArrival);
-
-
-    while (station->currentTrainSeatCount > station->numBoardedPassengers && station->numWaitingPassengers > 0) {
-        pthread_cond_wait(&station->trainFull, &station->stationEntry);
+    //prevent trains from entering the station
+    station->stationAvailableForTrainEntry = false;
+    //wait till the train can leave
+    while (station->currentTrainSeatCount != station->numBoardedPassengers && station->numWaitingPassengers > 0) {
+        pthread_cond_wait(&station->trainFull, &station->mutex);
     }
 
 
@@ -152,28 +175,58 @@ void station_load_train(struct station *station, int seatCount) {
            station->numBoardedPassengers, station->numWaitingPassengers);
 
     station->numBoardedPassengers = 0;
+    station->stationAvailableForTrainEntry = true;
+    pthread_cond_signal(&station->stationAvailable);
 
-    pthread_mutex_unlock(&station->stationEntry);
+    pthread_mutex_unlock(&station->mutex);
     pthread_exit(NULL);
-
 }
 
 void station_wait_for_train(struct station *station) {
-    pthread_mutex_lock(&station->stationEntry);
+    pthread_mutex_lock(&station->mutex);
 
+//    station->numWaitingPassengers++;
+//    pthread_cond_wait(&station->trainArrival, &station->mutex);
+//
+//    if (station->numBoardedPassengers < station->currentTrainSeatCount){
+//        station->numBoardedPassengers++;
+//        station->numWaitingPassengers--;
+//
+//        station_on_board(station);
+//    } else{
+//        pthread_cond_signal(&station->trainFull);
+//    }
+
+    //wait for train
     station->numWaitingPassengers++;
+    while (station->stationAvailableForTrainEntry){
+        pthread_cond_wait(&station->trainArrival, &station->mutex);
+        //train arrived first check if there is an available seat
+        if (station->numBoardedPassengers < station->currentTrainSeatCount){
+            station->numBoardedPassengers++;
+            station->numWaitingPassengers--;
 
-    pthread_cond_wait(&station->trainArrival, &station->stationEntry);
+            //if there is one then board the train
+            station_on_board(station);
 
-    station_on_board(station);
+            //if this was the last waiting passenger
+            if (station->numWaitingPassengers == 0)
+                //signal the train to move
+                pthread_cond_signal(&station->trainFull);
 
-    pthread_mutex_unlock(&station->stationEntry);
+            break;
+        }else{
+            //train is full signal the train to leave and loop wait for the train to arrive
+            pthread_cond_signal(&station->trainFull);
+        }
+    }
+
+    pthread_mutex_unlock(&station->mutex);
     pthread_exit(NULL);
 }
 
+//passenger boards the train
 void station_on_board(struct station *station) {
-    station->numBoardedPassengers++;
-    station->numWaitingPassengers--;
 
     char passengerName[THREAD_NAME_LENGTH];
 
@@ -181,13 +234,10 @@ void station_on_board(struct station *station) {
 
     printf("\n%s has boarded the train, %d passengers onboard ", passengerName, station->numBoardedPassengers);
 
-    if (station->numBoardedPassengers == station->currentTrainSeatCount || station->numWaitingPassengers == 0)
-        pthread_cond_signal(&station->trainFull);
-
 }
 
 void *passengerSubRoutine(void *args) {
-    station_wait_for_train(args);
+    station_wait_for_train((struct station*)args);
 }
 
 void *trainSubRoutine(void *args) {
