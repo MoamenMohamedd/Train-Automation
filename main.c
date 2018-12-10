@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+//data used in train subroutine
 typedef struct TrainData {
     Station *trainStation;
     int numberOfFreeSeats;
@@ -41,18 +42,23 @@ void *trainSubRoutine(void *args) {
     TrainData *trainData = (TrainData *) args;
     Station* trainStation = trainData->trainStation;
 
+    //load the train
     station_load_train(trainStation, trainData->numberOfFreeSeats);
 
+    //leave station
     char trainName[THREAD_NAME_LENGTH];
     pthread_getname_np(pthread_self(), trainName, THREAD_NAME_LENGTH);
     printf("\n%s left the station with %d passengers onboard and %d waiting passengers\n", trainName,
            trainStation->numBoardedPassengers, trainStation->numWaitingPassengers);
 
+    //reset boardedPassengers num for next train
     trainStation->numBoardedPassengers = 0;
-    trainStation->aTrainIsLoading = false;
 
+    //wake a waiting train
+    trainStation->aTrainIsLoading = false;
     pthread_cond_signal(&trainStation->cond_station_platform);
 
+    //unlock mutex
     pthread_mutex_unlock(&trainStation->mutex);
     pthread_exit(NULL);
 }
@@ -63,6 +69,8 @@ int main() {
     char scenario[100] , command;
 
     pthread_t *trainIds = (pthread_t*)malloc(0) , *passengerIds = (pthread_t*)malloc(0);
+
+    //attribute to specify that the created thread will be joined later
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
@@ -70,7 +78,8 @@ int main() {
     Station *kingsCrossStation = (Station *) malloc(sizeof(Station));
     station_init(kingsCrossStation);
 
-//    printf("Enter a scenario : ");
+    //read a scenario and generate it
+    printf("Enter a scenario : ");
     fgets(scenario, sizeof(scenario),stdin);
 //    char test[100] = "10p 30t 20p";
 //    char test[100] = "10p 30t 50p 30t 20t";
@@ -91,6 +100,7 @@ int main() {
 
                     pthread_create(&passengerIds[i], &attr, passengerSubRoutine, (void *) kingsCrossStation);
 
+                    //sets a name for passenger thread
                     char passengerName[THREAD_NAME_LENGTH];
                     sprintf(passengerName, "passenger-%d", (i + 1));
                     pthread_setname_np(passengerIds[i], passengerName);
@@ -106,6 +116,7 @@ int main() {
 
                 pthread_create(&trainIds[numTrains], &attr, trainSubRoutine, (void *) trainData);
 
+                //sets a name for train thread
                 char trainName[THREAD_NAME_LENGTH];
                 sprintf(trainName, "train-%d", (numTrains + 1));
                 pthread_setname_np(trainIds[numTrains], trainName);
@@ -121,9 +132,9 @@ int main() {
     }
 
 
-
     pthread_attr_destroy(&attr);
 
+    //main thread waits (joins) created passenger and train threads
     for (int i = 0; i < numPassengers; i++) {
         pthread_join(passengerIds[i], NULL);
     }
@@ -132,6 +143,7 @@ int main() {
         pthread_join(trainIds[i], NULL);
     }
 
+    //release mutex and condition variables
     pthread_mutex_destroy(&kingsCrossStation->mutex);
     pthread_cond_destroy(&kingsCrossStation->cond_station_platform);
     pthread_cond_destroy(&kingsCrossStation->cond_train_arrival);
